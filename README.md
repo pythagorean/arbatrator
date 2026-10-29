@@ -142,6 +142,13 @@ The image's base can be overridden for mirrors:
 
 ## License
 
-MIT. See [LICENSE](LICENSE). `appliance/seccomp-chromium.json` is derived
-from the Moby project's default seccomp profile (Apache-2.0); see
-[NOTICE](NOTICE).
+Arbatrate's own code is released into the public domain (the
+[Unlicense](LICENSE)): use it for anything, no conditions.
+
+The one exception is `appliance/seccomp-chromium.json`, which is derived
+from the Moby project's default seccomp profile and stays under Apache-2.0;
+see [NOTICE](NOTICE).
+
+The appliance image is built from Debian packages (Chromium, PipeWire,
+ffmpeg and others) and yt-dlp, fetched when you build it. Each keeps its own
+license; this repository does not contain or redistribute them.
