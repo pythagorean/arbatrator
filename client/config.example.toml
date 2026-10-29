@@ -1,0 +1,63 @@
+# Arbatrate client configuration.
+# Copy to ~/.config/arbatrate/config.toml and set "host". Every other line
+# shows the default and can be left out.
+
+# The appliance host, as you would give it to ssh.
+host = "you@browser-vm"
+
+# Which browser profile to open. Each profile is its own podman volume on
+# the host (arbatrate-profile-NAME) and its own running container.
+profile = "default"
+
+# Extra ssh options, e.g. ["-p", "2222"] or ["-i", "~/.ssh/arbatrate"].
+ssh_options = []
+
+# Where arbatrate-host lives on the host, relative to the ssh login directory.
+host_command = ".local/bin/arbatrate-host"
+
+# The appliance image on the host.
+image = "localhost/arbatrate:latest"
+
+[waypipe]
+# Options placed before "waypipe ssh". On a slow link try "--compress=zstd=5";
+# with GPUs on both ends, "--video=h264" can help.
+options = ["--compress=lz4"]
+
+[chromium]
+# Extra Chromium flags, e.g. ["--force-dark-mode", "--lang=en-GB"].
+flags = []
+
+[podman]
+# Extra "podman run" arguments. label=disable lets the container use the
+# forwarded Wayland socket on SELinux hosts. The host adds the seccomp
+# profile that Chromium's sandbox needs on its own.
+args = ["--security-opt", "label=disable"]
+
+[audio]
+enabled = true
+bitrate = "128k"
+# Opus frame length in milliseconds: 2.5, 5, 10, 20. Shorter is lower
+# latency and a little less efficient.
+frame_ms = 10
+# Reads Ogg/Opus on stdin. ffplay works too:
+#   ["ffplay", "-nodisp", "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay", "-i", "-"]
+player = ["mpv", "--no-video", "--profile=low-latency", "--cache=no", "--audio-buffer=0.05", "--really-quiet", "-"]
+
+[handoff]
+enabled = true
+# "relay": the appliance fetches the media (with the profile's cookies) and
+#          streams it to your player; sites only ever see the appliance.
+# "local": your player fetches the URL itself (mpv uses yt-dlp for pages).
+mode = "relay"
+# Placeholders: {url} {page_url} {title} {start}. An argument whose
+# placeholder has no value is left out.
+relay_player = ["mpv", "--force-window=immediate", "--title={title}", "-"]
+local_player = ["mpv", "--force-window=immediate", "--title={title}", "--start={start}", "{url}"]
+# yt-dlp format selector for relay; empty uses the appliance's default
+# (best video+audio that ffmpeg can fetch directly).
+relay_format = ""
+# Fetch with the browser profile's cookies, so signed-in pages work.
+relay_cookies = true
+# ffmpeg codec arguments for relay; empty copies the streams unchanged.
+# For a weak client: "-c:v libx264 -preset veryfast -crf 23 -c:a libopus -b:a 128k"
+relay_transcode = ""

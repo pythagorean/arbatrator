@@ -1,0 +1,455 @@
+#!/usr/bin/env python3
+"""arbatrate: the client side of Arbatrate.
+
+Runs on your own machine, in a Wayland session. It brings up the remote
+browser through waypipe, plays its sound locally, and acts on media the
+browser hands off.
+
+  arbatrate [connect] [--profile NAME]   open the remote browser
+  arbatrate play URL [--profile NAME]    hand one URL to the local player
+  arbatrate install-host                 copy the appliance to the host and build it
+  arbatrate doctor                       check this machine and the host
+  arbatrate config                       print the effective configuration
+
+Configuration: $XDG_CONFIG_HOME/arbatrate/config.toml (see config.example.toml).
+"""
+import argparse
+import copy
+import json
+import os
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+import tomllib
+from pathlib import Path
+from urllib.parse import urlsplit
+
+DEFAULTS = {
+    "host": "",
+    "profile": "default",
+    "ssh_options": [],
+    "host_command": ".local/bin/arbatrate-host",
+    "image": "localhost/arbatrate:latest",
+    "waypipe": {"options": ["--compress=lz4"]},
+    "chromium": {"flags": []},
+    "podman": {"args": ["--security-opt", "label=disable"]},
+    "audio": {
+        "enabled": True,
+        "bitrate": "128k",
+        "frame_ms": 10,
+        "player": ["mpv", "--no-video", "--profile=low-latency", "--cache=no",
+                   "--audio-buffer=0.05", "--really-quiet", "-"],
+    },
+    "handoff": {
+        "enabled": True,
+        "mode": "relay",
+        "relay_player": ["mpv", "--force-window=immediate", "--title={title}", "-"],
+        "local_player": ["mpv", "--force-window=immediate", "--title={title}",
+                         "--start={start}", "{url}"],
+        "relay_format": "",
+        "relay_cookies": True,
+        "relay_transcode": "",
+    },
+}
+
+HANDOFF_MODES = ("relay", "local")
+
+
+class ConfigError(Exception):
+    pass
+
+
+def config_path():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return Path(base) / "arbatrate" / "config.toml"
+
+
+def merge(base, over, where=""):
+    out = copy.deepcopy(base)
+    for key, value in over.items():
+        if key not in base:
+            raise ConfigError(f"unknown setting {where}{key}")
+        if isinstance(base[key], dict):
+            if not isinstance(value, dict):
+                raise ConfigError(f"{where}{key} must be a table")
+            out[key] = merge(base[key], value, f"{where}{key}.")
+        else:
+            if type(value) is not type(base[key]):
+                raise ConfigError(f"{where}{key} must be a {type(base[key]).__name__}")
+            out[key] = value
+    return out
+
+
+def load_config(path=None):
+    path = path or config_path()
+    over = {}
+    if path.exists():
+        with open(path, "rb") as f:
+            over = tomllib.load(f)
+    cfg = merge(DEFAULTS, over)
+    if cfg["handoff"]["mode"] not in HANDOFF_MODES:
+        raise ConfigError(f"handoff.mode must be one of {', '.join(HANDOFF_MODES)}")
+    return cfg
+
+
+# ---------------------------------------------------------------- handoff --
+
+def validate_request(obj):
+    """Check a handoff request from the appliance. The appliance is trusted
+    to carry requests, not to choose what runs here, so only http(s) URLs and
+    plain values get through."""
+    if not isinstance(obj, dict) or obj.get("type") != "play":
+        raise ValueError("not a play request")
+    for field in ("url", "page_url"):
+        value = obj.get(field)
+        if value is None and field == "page_url":
+            continue
+        if not isinstance(value, str) or urlsplit(value).scheme not in ("http", "https"):
+            raise ValueError(f"{field} must be an http or https URL")
+    start = obj.get("start")
+    if start is not None and (isinstance(start, bool) or not isinstance(start, (int, float)) or start < 0):
+        raise ValueError("bad start")
+    title = obj.get("title") or ""
+    if not isinstance(title, str):
+        raise ValueError("bad title")
+    return {"type": "play", "url": obj["url"], "page_url": obj.get("page_url"),
+            "title": title, "start": start}
+
+
+def fill_template(argv, values):
+    """Substitute {name} placeholders in a player command. An argument whose
+    placeholder has no value (say {start} with no position) is dropped."""
+    out = []
+    for arg in argv:
+        filled = arg
+        skip = False
+        for name, value in values.items():
+            token = "{" + name + "}"
+            if token in filled:
+                if value is None or value == "":
+                    skip = True
+                    break
+                filled = filled.replace(token, str(value))
+        if not skip:
+            out.append(filled)
+    return out
+
+
+def player_values(request):
+    start = request["start"]
+    return {
+        "url": request["url"],
+        "page_url": request["page_url"],
+        "title": request["title"] or request["url"],
+        "start": f"{start:.3f}" if start else None,
+    }
+
+
+# -------------------------------------------------------------------- ssh --
+
+class Remote:
+    def __init__(self, cfg, profile):
+        if not cfg["host"]:
+            raise ConfigError(f"no host configured; set host in {config_path()}")
+        self.cfg = cfg
+        self.profile = profile
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+        self.control = os.path.join(runtime, "arbatrate-ssh-%C")
+
+    def ssh_options(self):
+        return ["-o", "ControlMaster=auto", "-o", f"ControlPath={self.control}",
+                *self.cfg["ssh_options"]]
+
+    def env(self):
+        c = self.cfg
+        values = {
+            "ARBATRATE_IMAGE": c["image"],
+            "ARBATRATE_PODMAN_ARGS": shlex.join(c["podman"]["args"]),
+            "ARBATRATE_CHROMIUM_FLAGS": shlex.join(c["chromium"]["flags"]),
+            "ARBATRATE_AUDIO_BITRATE": c["audio"]["bitrate"],
+            "ARBATRATE_AUDIO_FRAME_MS": str(c["audio"]["frame_ms"]),
+            "ARBATRATE_RELAY_FORMAT": c["handoff"]["relay_format"],
+            "ARBATRATE_RELAY_COOKIES": "1" if c["handoff"]["relay_cookies"] else "0",
+            "ARBATRATE_RELAY_TRANSCODE": c["handoff"]["relay_transcode"],
+        }
+        return [f"{k}={v}" for k, v in values.items()]
+
+    def command(self, *args):
+        """The remote command line: host_command is left unquoted so the
+        remote shell can expand it; everything else is quoted."""
+        return " ".join(["env", *map(shlex.quote, self.env()),
+                         self.cfg["host_command"], *map(shlex.quote, args)])
+
+    def ssh(self, *args, tty=False):
+        return ["ssh", *(["-t"] if tty else []), *self.ssh_options(),
+                self.cfg["host"], self.command(*args)]
+
+    def start_master(self):
+        subprocess.run(["ssh", "-o", "ControlMaster=yes", "-o", f"ControlPath={self.control}",
+                        "-o", "ControlPersist=yes", *self.cfg["ssh_options"], "-fN",
+                        self.cfg["host"]], check=True)
+
+    def stop_master(self):
+        # The control path is a hash over host, port and user, so the
+        # configured ssh options must be given again to find it.
+        subprocess.run(["ssh", "-o", f"ControlPath={self.control}", *self.cfg["ssh_options"],
+                        "-O", "exit", self.cfg["host"]],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def waypipe(self, *args):
+        return ["waypipe", *self.cfg["waypipe"]["options"], "ssh", *self.ssh_options(),
+                self.cfg["host"], self.command(*args)]
+
+
+# ---------------------------------------------------------------- session --
+
+def log(msg):
+    print(f"arbatrate: {msg}", file=sys.stderr, flush=True)
+
+
+def pipeline(producer, consumer):
+    """Start producer | consumer; return both processes."""
+    p = subprocess.Popen(producer, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         start_new_session=True)
+    c = subprocess.Popen(consumer, stdin=p.stdout, start_new_session=True)
+    p.stdout.close()
+    return p, c
+
+
+def terminate(procs):
+    for p in procs:
+        if p.poll() is None:
+            try:
+                os.killpg(p.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+    deadline = time.monotonic() + 5
+    for p in procs:
+        try:
+            p.wait(max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            p.wait()
+
+
+class Handoffs:
+    """Acts on handoff requests. A request that fails is reported and that is
+    all: one bad URL is not a fault in the session."""
+
+    def __init__(self, cfg, remote):
+        self.cfg = cfg["handoff"]
+        self.remote = remote
+        self.jobs = []
+        self.lock = threading.Lock()
+
+    def play(self, request):
+        values = player_values(request)
+        if self.cfg["mode"] == "local":
+            procs = [subprocess.Popen(fill_template(self.cfg["local_player"], values),
+                                      start_new_session=True)]
+        else:
+            fetch = self.remote.ssh("exec", self.remote.profile, "arbatrate-fetch",
+                                    json.dumps(request))
+            procs = list(pipeline(fetch, fill_template(self.cfg["relay_player"], values)))
+        with self.lock:
+            self.jobs.append(procs)
+        log(f"playing {request['url']} ({self.cfg['mode']})")
+
+    def read(self, stream):
+        for line in stream:
+            try:
+                request = validate_request(json.loads(line))
+            except ValueError as e:
+                log(f"ignored a bad handoff request: {e}")
+                continue
+            try:
+                self.play(request)
+            except OSError as e:
+                log(f"handoff failed: {e}")
+
+    def stop(self):
+        with self.lock:
+            for procs in self.jobs:
+                terminate(procs)
+
+
+def connect(cfg, profile):
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        raise ConfigError("not in a Wayland session (WAYLAND_DISPLAY is not set)")
+    remote = Remote(cfg, profile)
+    remote.start_master()
+    critical = []
+    handoffs = Handoffs(cfg, remote)
+    status = 1
+    try:
+        browser = subprocess.Popen(remote.waypipe("run", profile), stdin=subprocess.DEVNULL,
+                                   start_new_session=True)
+        critical.append(browser)
+        # Wait for the appliance, but stop waiting the moment the browser
+        # side fails: its error is the one worth reading.
+        ready = subprocess.Popen(remote.ssh("wait-ready", profile), stdin=subprocess.DEVNULL,
+                                 start_new_session=True)
+        critical.append(ready)
+        while ready.poll() is None and browser.poll() is None:
+            time.sleep(0.2)
+        critical.remove(ready)
+        if browser.poll() is not None or ready.returncode != 0:
+            terminate([ready])
+            log("the appliance did not come up")
+            return browser.poll() or ready.returncode or 1
+        log(f"browser '{profile}' is up on {cfg['host']}")
+
+        if cfg["audio"]["enabled"]:
+            critical += pipeline(remote.ssh("exec", profile, "arbatrate-audio-out"),
+                                 cfg["audio"]["player"])
+        if cfg["handoff"]["enabled"]:
+            stream = subprocess.Popen(remote.ssh("exec", profile, "arbatrate-handoff-stream"),
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                      text=True, start_new_session=True)
+            critical.append(stream)
+            threading.Thread(target=handoffs.read, args=(stream.stdout,), daemon=True).start()
+
+        # Nothing here is restarted: the first part of the session to end
+        # ends the session, and its status is ours.
+        while True:
+            for p in critical:
+                code = p.poll()
+                if code is not None:
+                    name = shlex.join(p.args) if isinstance(p.args, list) else p.args
+                    if p is not browser or code != 0:
+                        log(f"exited with status {code}: {name}")
+                    status = code
+                    return status
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        status = 130
+        return status
+    finally:
+        handoffs.stop()
+        terminate(critical)
+        subprocess.run(remote.ssh("stop", profile))
+        remote.stop_master()
+
+
+def play(cfg, profile, url):
+    request = validate_request({"type": "play", "url": url, "page_url": url, "title": "", "start": None})
+    remote = Remote(cfg, profile)
+    h = Handoffs(cfg, remote)
+    h.play(request)
+    codes = [p.wait() for p in h.jobs[0]]
+    return max(codes)
+
+
+# ----------------------------------------------------------------- setup --
+
+def data_dir():
+    """Where the appliance and host sources live: an installed share
+    directory next to bin/, or the source checkout this file sits in."""
+    env = os.environ.get("ARBATRATE_DATA_DIR")
+    here = Path(__file__).resolve().parent
+    for candidate in ([Path(env)] if env else []) + [here.parent / "share" / "arbatrate", here.parent]:
+        if (candidate / "appliance" / "Containerfile").exists():
+            return candidate
+    raise ConfigError("cannot find the appliance sources; set ARBATRATE_DATA_DIR")
+
+
+def install_host(cfg):
+    remote = Remote(cfg, cfg["profile"])
+    src = data_dir()
+    tar = subprocess.Popen(["tar", "-C", str(src), "-cz", "appliance", "host"],
+                           stdout=subprocess.PIPE)
+    unpack = ("set -e; d=.local/share/arbatrate; rm -rf \"$d/appliance\" \"$d/host\"; "
+              "mkdir -p \"$d\" .local/bin; tar -C \"$d\" -xz; "
+              "install -m 0755 \"$d/host/arbatrate-host\" .local/bin/arbatrate-host")
+    r = subprocess.run(["ssh", *remote.ssh_options(), cfg["host"], unpack], stdin=tar.stdout)
+    tar.stdout.close()
+    if tar.wait() != 0 or r.returncode != 0:
+        return 1
+    log(f"installed on {cfg['host']}; building the image")
+    return subprocess.run(remote.ssh("build", "--pull")).returncode
+
+
+def first_line(argv):
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return ((r.stdout or r.stderr).strip().splitlines() or [""])[0]
+
+
+def doctor(cfg):
+    ok = True
+
+    def say(name, value, good=True):
+        nonlocal ok
+        ok = ok and good
+        print(f"{name:<28} {value}")
+
+    print("This machine:")
+    say("wayland session", os.environ.get("WAYLAND_DISPLAY") or "MISSING", bool(os.environ.get("WAYLAND_DISPLAY")))
+    local_waypipe = first_line(["waypipe", "--version"]) if shutil.which("waypipe") else None
+    say("waypipe", local_waypipe or "MISSING", bool(local_waypipe))
+    say("ssh", "found" if shutil.which("ssh") else "MISSING", bool(shutil.which("ssh")))
+    players = {"audio.player": cfg["audio"]["player"][0] if cfg["audio"]["enabled"] else None,
+               "handoff player": (cfg["handoff"]["relay_player" if cfg["handoff"]["mode"] == "relay"
+                                              else "local_player"][0] if cfg["handoff"]["enabled"] else None)}
+    for name, exe in players.items():
+        if exe:
+            say(name, shutil.which(exe) or f"MISSING ({exe})", bool(shutil.which(exe)))
+    if not cfg["host"]:
+        say("host", f"NOT SET in {config_path()}", False)
+        return 1
+    print(f"\nHost {cfg['host']}:")
+    remote = Remote(cfg, cfg["profile"])
+    r = subprocess.run(["ssh", *remote.ssh_options(), "-o", "BatchMode=yes", cfg["host"],
+                        remote.command("doctor")])
+    ok = ok and r.returncode == 0
+    remote_waypipe = first_line(["ssh", *remote.ssh_options(), cfg["host"], "waypipe --version"])
+    if local_waypipe and remote_waypipe and local_waypipe != remote_waypipe:
+        say("waypipe versions", f"DIFFER: here {local_waypipe!r}, host {remote_waypipe!r}", False)
+    return 0 if ok else 1
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="arbatrate", description=__doc__.split("\n\n")[0])
+    parser.add_argument("--config", type=Path, help="configuration file")
+    sub = parser.add_subparsers(dest="cmd")
+    p = sub.add_parser("connect", help="open the remote browser")
+    p.add_argument("--profile")
+    p = sub.add_parser("play", help="hand one URL to the local player")
+    p.add_argument("url")
+    p.add_argument("--profile")
+    sub.add_parser("install-host", help="copy the appliance to the host and build it")
+    sub.add_parser("doctor", help="check this machine and the host")
+    sub.add_parser("config", help="print the effective configuration")
+    args = parser.parse_args(argv)
+
+    try:
+        cfg = load_config(args.config)
+        profile = getattr(args, "profile", None) or cfg["profile"]
+        if args.cmd in (None, "connect"):
+            return connect(cfg, profile)
+        if args.cmd == "play":
+            return play(cfg, profile, args.url)
+        if args.cmd == "install-host":
+            return install_host(cfg)
+        if args.cmd == "doctor":
+            return doctor(cfg)
+        if args.cmd == "config":
+            print(json.dumps(cfg, indent=2))
+            return 0
+    except (ConfigError, ValueError, tomllib.TOMLDecodeError) as e:
+        log(str(e))
+        return 2
+    except subprocess.CalledProcessError as e:
+        log(f"command failed ({e.returncode}): {shlex.join(e.cmd)}")
+        return 1
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

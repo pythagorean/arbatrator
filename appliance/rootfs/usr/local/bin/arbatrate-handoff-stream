@@ -1,0 +1,71 @@
+#!/usr/bin/python3
+"""Carry media-handoff requests from the browser extension to the client.
+
+The client runs this over SSH for the length of a session. It listens on a
+Unix socket inside the container; arbatrate-native-host (started by Chromium
+for the extension) connects, sends one JSON request line and gets one JSON
+reply line. Each accepted request is written to stdout as one JSON line,
+which the client reads and acts on.
+
+Only one stream may run at a time: a second client would split requests
+between two players.
+"""
+import json
+import os
+import socket
+import sys
+
+sys.path.insert(0, "/usr/local/lib/arbatrate")
+from handoff import SOCKET_PATH, validate_request  # noqa: E402
+
+
+def bind_socket(path):
+    if os.path.exists(path):
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.connect(path)
+        except ConnectionRefusedError:
+            os.unlink(path)  # left behind by a stream that died
+        else:
+            sys.exit("arbatrate-handoff-stream: another client is already attached")
+        finally:
+            probe.close()
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    old = os.umask(0o077)
+    try:
+        sock.bind(path)
+    finally:
+        os.umask(old)
+    sock.listen(8)
+    return sock
+
+
+def serve(sock, out):
+    while True:
+        conn, _ = sock.accept()
+        with conn, conn.makefile("rwb") as f:
+            line = f.readline(65536)
+            try:
+                request = validate_request(json.loads(line))
+            except (ValueError, TypeError) as e:
+                reply = {"ok": False, "error": str(e)}
+            else:
+                out.write(json.dumps(request) + "\n")
+                out.flush()
+                reply = {"ok": True}
+            f.write((json.dumps(reply) + "\n").encode())
+
+
+def main():
+    path = os.environ.get("ARBATRATE_HANDOFF_SOCKET", SOCKET_PATH)
+    sock = bind_socket(path)
+    try:
+        serve(sock, sys.stdout)
+    except BrokenPipeError:
+        pass  # the client went away; the session is over for us
+    finally:
+        os.unlink(path)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,51 @@
+#!/usr/bin/python3
+"""Chromium native-messaging host for the Arbatrate extension.
+
+Chromium starts this for each message the extension sends. It passes the
+request to arbatrate-handoff-stream over its Unix socket and returns the
+reply, so the extension can tell the user whether a client is attached.
+"""
+import json
+import socket
+import struct
+import sys
+
+sys.path.insert(0, "/usr/local/lib/arbatrate")
+from handoff import SOCKET_PATH  # noqa: E402
+
+
+def read_message(stream):
+    header = stream.read(4)
+    if len(header) != 4:
+        return None
+    (length,) = struct.unpack("<I", header)
+    return json.loads(stream.read(length))
+
+
+def write_message(stream, obj):
+    data = json.dumps(obj).encode()
+    stream.write(struct.pack("<I", len(data)) + data)
+    stream.flush()
+
+
+def forward(request):
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(SOCKET_PATH)
+    except (FileNotFoundError, ConnectionRefusedError):
+        return {"ok": False, "error": "No Arbatrate client is attached to this browser."}
+    with sock, sock.makefile("rwb") as f:
+        f.write((json.dumps(request) + "\n").encode())
+        f.flush()
+        return json.loads(f.readline())
+
+
+def main():
+    message = read_message(sys.stdin.buffer)
+    if message is None:
+        return
+    write_message(sys.stdout.buffer, forward(message))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,67 @@
+#!/bin/bash
+# Container entrypoint: start the audio graph, then Chromium, and exit as soon
+# as any one of them exits. Nothing is restarted. If PipeWire dies, the session
+# ends and says which process died; that is how a fault gets noticed.
+set -euo pipefail
+
+: "${WAYLAND_DISPLAY:?WAYLAND_DISPLAY must name the forwarded Wayland socket}"
+if [ ! -S "$WAYLAND_DISPLAY" ] && [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+    echo "arbatrate: Wayland socket $WAYLAND_DISPLAY is not present" >&2
+    exit 2
+fi
+
+install -d -m 0700 "$XDG_RUNTIME_DIR" "$XDG_RUNTIME_DIR/arbatrate"
+
+declare -A NAMES=()
+start() {
+    local name=$1; shift
+    "$@" &
+    NAMES[$!]=$name
+}
+
+# Each piece waits for the socket of the one before it; started together,
+# wireplumber finds no PipeWire and gives up.
+wait_for_socket() {
+    local what=$1 path=$2
+    for _ in $(seq 100); do
+        [ -S "$path" ] && return 0
+        sleep 0.1
+    done
+    echo "arbatrate: $what did not come up" >&2
+    exit 3
+}
+
+# A private session bus; wireplumber and Chromium both look for one.
+export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+start dbus dbus-daemon --session --nofork --address="$DBUS_SESSION_BUS_ADDRESS"
+wait_for_socket dbus "$XDG_RUNTIME_DIR/bus"
+
+start pipewire pipewire
+wait_for_socket pipewire "$XDG_RUNTIME_DIR/pipewire-0"
+start wireplumber wireplumber
+start pipewire-pulse pipewire-pulse
+# Chromium comes up silent if it starts before the pulse socket exists.
+wait_for_socket pipewire-pulse "$XDG_RUNTIME_DIR/pulse/native"
+
+PROFILE_DIR=$HOME/chromium
+# shellcheck disable=SC2206  # ARBATRATE_CHROMIUM_FLAGS is word-split on purpose
+FLAGS=(
+    --ozone-platform=wayland
+    --user-data-dir="$PROFILE_DIR"
+    --password-store=basic
+    --no-first-run
+    --no-default-browser-check
+    --disable-features=DisableLoadExtensionCommandLineSwitch
+    --load-extension=/opt/arbatrate/extension
+    ${ARBATRATE_CHROMIUM_FLAGS:-}
+)
+start chromium chromium "${FLAGS[@]}" "$@"
+
+touch "$XDG_RUNTIME_DIR/arbatrate/ready"
+echo "arbatrate: ready" >&2
+
+status=0
+wait -n -p done_pid || status=$?
+echo "arbatrate: ${NAMES[$done_pid]:-pid $done_pid} exited with status $status; ending session" >&2
+kill "${!NAMES[@]}" 2>/dev/null || true
+exit "$status"

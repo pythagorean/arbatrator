@@ -1,0 +1,7 @@
+appliance/seccomp-chromium.json is derived from the default seccomp profile
+of the Moby project (https://github.com/moby/profiles, seccomp/default.json),
+Copyright Docker, Inc. and the Moby authors, licensed under the Apache
+License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0).
+
+Change made: one rule appended, allowing clone, unshare and setns without
+argument filters, so that Chromium's sandbox can create its namespaces.

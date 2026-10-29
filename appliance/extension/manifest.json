@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Arbatrate media handoff",
+  "version": "0.1.0",
+  "description": "Offers to play media from this remote browser in a player on your own machine. Protected (DRM) media stays in the browser.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApKJ3cZt7XxhH5fBJQbeGDUoMlNOZLofWAcIbC0Az3QCptndCUXjTYbnPRqPGW86HVceU2VpT3Mt7Y1c/YzRpnWukcuod6a9NxZHZlzHAtmqn+VN3Leybzx771qcB/1lgZb16Kqk6czXqUJVmgQAJ9CjS+i/WfUlpuLHsvmPEyVOi7zITFj/SKPmHsoifzdE/nPWRJDYHG6WNKgvjT97oA3ezlr33pCj28XnkD+xTKHMkvyyoaQ+t7IaRs6B99eQco1GDQnpKBGDXJU7KWI3LNQm/Lco+RDxPLIgsmaIkrz6kXdYoalGy/yDpF1UH+kP/l59KJ6SMwi053oUHcALDSwIDAQAB",
+  "permissions": ["contextMenus", "nativeMessaging", "notifications", "scripting", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "all_frames": true,
+      "run_at": "document_start"
+    }
+  ],
+  "action": { "default_title": "Play this page's media locally" },
+  "icons": { "128": "icon128.png" }
+}

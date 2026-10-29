@@ -1,0 +1,7 @@
+{
+  "name": "org.arbatrate.handoff",
+  "description": "Arbatrate media handoff",
+  "path": "/usr/local/bin/arbatrate-native-host",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://nfalmkkdeagdjinahclhaohnabdfpclm/"]
+}

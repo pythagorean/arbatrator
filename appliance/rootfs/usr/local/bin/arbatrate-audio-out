@@ -1,0 +1,22 @@
+#!/bin/bash
+# Record the browser's sink and write it to stdout as low-latency Ogg/Opus.
+# The client runs this over SSH and pipes the stream into a local player.
+#
+# Tunables (environment, set by the client from its configuration):
+#   ARBATRATE_AUDIO_BITRATE   Opus bitrate, e.g. 128k (default)
+#   ARBATRATE_AUDIO_FRAME_MS  Opus frame duration in ms: 2.5 5 10 20 (default 10)
+set -euo pipefail
+
+[ -e "$XDG_RUNTIME_DIR/arbatrate/ready" ] || { echo "arbatrate-audio-out: appliance is not ready" >&2; exit 2; }
+
+frame=${ARBATRATE_AUDIO_FRAME_MS:-10}
+# One Ogg page per Opus frame, so nothing sits in the muxer.
+page_us=$(awk -v f="$frame" 'BEGIN { printf "%d", f * 1000 }')
+
+exec ffmpeg -hide_banner -loglevel error -nostdin \
+    -f pulse -fragment_size 1920 -i arbatrate.monitor \
+    -ac 2 -ar 48000 \
+    -c:a libopus -b:a "${ARBATRATE_AUDIO_BITRATE:-128k}" \
+    -application audio -frame_duration "$frame" \
+    -flush_packets 1 -page_duration "$page_us" \
+    -f ogg pipe:1

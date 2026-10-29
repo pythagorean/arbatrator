@@ -1,0 +1,43 @@
+# Arbatrate appliance image: Chromium on Wayland with its own PipeWire audio
+# graph, a media-handoff extension and the fetcher that relays media to the
+# client's player.
+#
+# Build on the appliance host with:  arbatrate-host build
+ARG BASE=docker.io/library/debian:trixie-slim
+FROM ${BASE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      chromium \
+      fonts-dejavu-core fonts-liberation2 fonts-noto-color-emoji fonts-noto-cjk \
+      pipewire pipewire-pulse pipewire-bin wireplumber \
+      dbus \
+      ffmpeg \
+      python3 python3-venv \
+      nodejs \
+      tini \
+ && rm -rf /var/lib/apt/lists/*
+
+# yt-dlp moves faster than any distribution; install it into its own venv.
+# "default" pulls yt-dlp-ejs, which yt-dlp runs under nodejs for sites that
+# need JavaScript challenges solved. Rebuild the image to refresh it.
+RUN python3 -m venv /opt/yt-dlp \
+ && /opt/yt-dlp/bin/pip install --no-cache-dir 'yt-dlp[default]' \
+ && ln -s /opt/yt-dlp/bin/yt-dlp /usr/local/bin/yt-dlp
+
+RUN useradd --create-home --uid 1000 --user-group --shell /bin/bash browser
+
+COPY rootfs/ /
+COPY extension/ /opt/arbatrate/extension/
+RUN chmod 0755 /usr/local/bin/arbatrate-*
+
+USER browser
+WORKDIR /home/browser
+ENV XDG_RUNTIME_DIR=/tmp/arbatrate-runtime \
+    HOME=/home/browser \
+    LANG=C.UTF-8
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/arbatrate-entrypoint"]

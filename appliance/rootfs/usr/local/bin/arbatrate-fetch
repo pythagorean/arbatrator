@@ -1,0 +1,74 @@
+#!/usr/bin/python3
+"""Fetch one piece of media on the appliance and write it to stdout.
+
+The client runs this over SSH for a handoff in relay mode and pipes stdout
+into its local player. The media is fetched from here, with this browser
+profile's cookies, so the appliance stays the only machine that talks to the
+site.
+
+Usage: arbatrate-fetch REQUEST_JSON
+
+yt-dlp resolves the URL. It refuses DRM-protected formats, and this program
+does not ask it to do otherwise: protected media stays in the browser.
+
+Tunables (environment, set by the client from its configuration):
+  ARBATRATE_RELAY_FORMAT     yt-dlp format selector
+  ARBATRATE_RELAY_COOKIES    "0" to fetch without the profile's cookies
+  ARBATRATE_RELAY_TRANSCODE  ffmpeg output codec arguments; empty copies streams
+"""
+import json
+import os
+import shlex
+import subprocess
+import sys
+
+sys.path.insert(0, "/usr/local/lib/arbatrate")
+from handoff import validate_request  # noqa: E402
+
+# Formats ffmpeg can read straight from a URL; DASH fragment lists it cannot.
+DEFAULT_FORMAT = "bv*[protocol!*=dash]+ba[protocol!*=dash]/b[protocol!*=dash]"
+PROFILE_DIR = os.path.join(os.environ.get("HOME", "/home/browser"), "chromium")
+
+
+def resolve(url):
+    cmd = ["yt-dlp", "--no-playlist", "--dump-single-json", "--no-warnings",
+           "-f", os.environ.get("ARBATRATE_RELAY_FORMAT") or DEFAULT_FORMAT]
+    if os.environ.get("ARBATRATE_RELAY_COOKIES", "1") != "0":
+        cmd += ["--cookies-from-browser", f"chromium:{PROFILE_DIR}"]
+    cmd += ["--", url]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, check=False)
+    if result.returncode != 0:
+        sys.exit(f"arbatrate-fetch: yt-dlp could not resolve {url}")
+    return json.loads(result.stdout)
+
+
+def ffmpeg_inputs(info, start):
+    formats = info.get("requested_formats") or [info]
+    args = []
+    for fmt in formats:
+        headers = "".join(f"{k}: {v}\r\n" for k, v in (fmt.get("http_headers") or {}).items())
+        if headers:
+            args += ["-headers", headers]
+        if start:
+            args += ["-ss", f"{start:.3f}"]
+        args += ["-i", fmt["url"]]
+    for i in range(len(formats)):
+        args += ["-map", f"{i}"]
+    return args
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit(__doc__)
+    request = validate_request(json.loads(sys.argv[1]))
+    info = resolve(request["url"])
+    codec = shlex.split(os.environ.get("ARBATRATE_RELAY_TRANSCODE", "")) or ["-c", "copy"]
+    cmd = (["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-xerror"]
+           + ffmpeg_inputs(info, request["start"])
+           + codec
+           + ["-f", "matroska", "pipe:1"])
+    os.execvp(cmd[0], cmd)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,141 @@
+#!/bin/bash
+# arbatrate-host: the appliance host's side of Arbatrate.
+#
+# Runs on the machine (usually a VM) that hosts the browser container. The
+# client calls it over SSH; it can also be used by hand.
+#
+#   arbatrate-host build [--pull]        build the appliance image
+#   arbatrate-host run PROFILE [ARGS]    run the browser (under waypipe)
+#   arbatrate-host wait-ready PROFILE    wait until a running appliance is ready
+#   arbatrate-host exec PROFILE CMD...   run CMD in a running appliance
+#   arbatrate-host stop PROFILE          stop a running appliance
+#   arbatrate-host doctor                check this host
+#
+# Environment:
+#   ARBATRATE_IMAGE            image name (default localhost/arbatrate:latest)
+#   ARBATRATE_DATA_DIR         where the appliance sources were installed
+#                              (default ~/.local/share/arbatrate)
+#   ARBATRATE_PODMAN_ARGS      extra arguments for "podman run", word-split
+#   ARBATRATE_CHROMIUM_FLAGS   extra Chromium flags, passed into the container
+#   ARBATRATE_*                all other ARBATRATE_ variables are passed to
+#                              "exec" commands in the container
+set -euo pipefail
+
+IMAGE=${ARBATRATE_IMAGE:-localhost/arbatrate:latest}
+DATA_DIR=${ARBATRATE_DATA_DIR:-$HOME/.local/share/arbatrate}
+WAYLAND_IN_CONTAINER=/tmp/arbatrate-wayland/wayland-0
+
+die() { echo "arbatrate-host: $*" >&2; exit 1; }
+
+check_profile() {
+    [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || die "bad profile name: $1"
+}
+
+container() { echo "arbatrate-$1"; }
+
+wayland_socket() {
+    : "${WAYLAND_DISPLAY:?WAYLAND_DISPLAY is not set; run this under waypipe (the client does)}"
+    local sock=$WAYLAND_DISPLAY
+    [[ $sock == /* ]] || sock=${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/$sock
+    [ -S "$sock" ] || die "no Wayland socket at $sock"
+    echo "$sock"
+}
+
+cmd_build() {
+    local pull=()
+    [ "${1:-}" = --pull ] && pull=(--pull=always)
+    [ -f "$DATA_DIR/appliance/Containerfile" ] || die "no appliance sources in $DATA_DIR (run 'arbatrate install-host' on the client)"
+    podman build "${pull[@]}" -t "$IMAGE" -f "$DATA_DIR/appliance/Containerfile" "$DATA_DIR/appliance"
+}
+
+cmd_run() {
+    local profile=${1:?profile}; shift
+    check_profile "$profile"
+    local sock
+    sock=$(wayland_socket)
+    [ -f "$DATA_DIR/appliance/seccomp-chromium.json" ] || die "no seccomp profile in $DATA_DIR/appliance"
+    # shellcheck disable=SC2206  # ARBATRATE_PODMAN_ARGS is word-split on purpose
+    local extra=(${ARBATRATE_PODMAN_ARGS:-})
+    exec podman run --rm \
+        --name "$(container "$profile")" \
+        --userns=keep-id:uid=1000,gid=1000 \
+        --shm-size=2g \
+        --security-opt seccomp="$DATA_DIR/appliance/seccomp-chromium.json" \
+        --volume "arbatrate-profile-$profile:/home/browser" \
+        --volume "$sock:$WAYLAND_IN_CONTAINER" \
+        --env WAYLAND_DISPLAY="$WAYLAND_IN_CONTAINER" \
+        --env ARBATRATE_CHROMIUM_FLAGS="${ARBATRATE_CHROMIUM_FLAGS:-}" \
+        "${extra[@]}" \
+        "$IMAGE" "$@"
+}
+
+cmd_wait_ready() {
+    local profile=${1:?profile}
+    check_profile "$profile"
+    local name
+    name=$(container "$profile")
+    for _ in $(seq 300); do
+        if podman exec "$name" sh -c 'test -e "$XDG_RUNTIME_DIR/arbatrate/ready"' 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    die "$name did not become ready"
+}
+
+cmd_exec() {
+    local profile=${1:?profile}; shift
+    check_profile "$profile"
+    local envs=() var
+    while IFS= read -r var; do
+        envs+=(--env "$var")
+    done < <(compgen -e | grep '^ARBATRATE_' || true)
+    exec podman exec -i "${envs[@]}" "$(container "$profile")" "$@"
+}
+
+cmd_stop() {
+    local profile=${1:?profile}
+    check_profile "$profile"
+    podman stop --ignore --time 5 "$(container "$profile")" >/dev/null
+}
+
+cmd_doctor() {
+    local ok=0
+    say() { printf '%-28s %s\n' "$1" "$2"; }
+    if command -v podman >/dev/null; then
+        say podman "$(podman --version)"
+    else
+        say podman "MISSING"; ok=1
+    fi
+    if command -v waypipe >/dev/null; then
+        say waypipe "$(waypipe --version 2>&1 | head -n1)"
+    else
+        say waypipe "MISSING (install the same version as on the client)"; ok=1
+    fi
+    if [ -f "$DATA_DIR/appliance/Containerfile" ]; then
+        say "appliance sources" "$DATA_DIR"
+    else
+        say "appliance sources" "MISSING in $DATA_DIR"; ok=1
+    fi
+    if command -v podman >/dev/null && podman image exists "$IMAGE"; then
+        say image "$IMAGE ($(podman image inspect --format '{{.Created}}' "$IMAGE"))"
+    else
+        say image "MISSING: run 'arbatrate-host build'"; ok=1
+    fi
+    if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+        say XDG_RUNTIME_DIR "$XDG_RUNTIME_DIR"
+    else
+        say XDG_RUNTIME_DIR "MISSING (waypipe needs it; enable lingering or log in with a session)"; ok=1
+    fi
+    return $ok
+}
+
+case "${1:-}" in
+    build)      shift; cmd_build "$@" ;;
+    run)        shift; cmd_run "$@" ;;
+    wait-ready) shift; cmd_wait_ready "$@" ;;
+    exec)       shift; cmd_exec "$@" ;;
+    stop)       shift; cmd_stop "$@" ;;
+    doctor)     shift; cmd_doctor "$@" ;;
+    *)          sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 2 ;;
+esac
