@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arbatrate — a remote browser appliance</title>
+<meta name="description" content="Run Chromium on a well-connected machine and use it from a thin laptop: the picture through waypipe, the sound as Opus, and media handed off to your own player.">
+<style>
+:root {
+  --bg: #fbfaf7;
+  --fg: #1d1f24;
+  --muted: #5d6270;
+  --line: #e2dfd8;
+  --card: #ffffff;
+  --accent: #2e5eaa;
+  --accent-soft: #e6eefb;
+  --code-bg: #f1efe9;
+  --code-fg: #1d1f24;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --fg: #e7e8ea;
+    --muted: #a0a5b1;
+    --line: #2a2e36;
+    --card: #1b1e24;
+    --accent: #8db4f5;
+    --accent-soft: #1f2a3d;
+    --code-bg: #0f1114;
+    --code-fg: #e7e8ea;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+}
+.wrap { max-width: 860px; margin: 0 auto; padding: 0 20px; }
+header { padding: 64px 0 32px; }
+.mark {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-weight: 650; letter-spacing: .02em; color: var(--accent);
+}
+.mark svg { width: 28px; height: 28px; }
+h1 { font-size: clamp(2rem, 5vw, 2.9rem); line-height: 1.15; margin: 18px 0 14px; letter-spacing: -.01em; }
+.lede { font-size: 1.15rem; color: var(--muted); max-width: 40em; margin: 0; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }
+.btn {
+  display: inline-block; padding: 10px 18px; border-radius: 8px;
+  text-decoration: none; font-weight: 600; border: 1px solid var(--accent);
+}
+.btn.primary { background: var(--accent); color: var(--bg); }
+.btn.secondary { color: var(--accent); }
+section { padding: 36px 0; border-top: 1px solid var(--line); }
+h2 { font-size: 1.5rem; margin: 0 0 16px; }
+h3 { font-size: 1.05rem; margin: 26px 0 8px; }
+p { margin: 0 0 14px; }
+a { color: var(--accent); }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+.card h3 { margin-top: 0; }
+.card p { margin: 0; color: var(--muted); font-size: .97rem; }
+.diagram { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; overflow-x: auto; }
+.diagram svg { display: block; width: 100%; min-width: 560px; height: auto; }
+.diagram text { fill: var(--fg); font: 13px system-ui, sans-serif; }
+.diagram .sub { fill: var(--muted); font-size: 12px; }
+.diagram .box { fill: var(--accent-soft); stroke: var(--line); }
+.diagram .outer { fill: none; stroke: var(--muted); stroke-dasharray: 4 4; }
+.diagram .wire { stroke: var(--accent); stroke-width: 2; fill: none; }
+.diagram .label { fill: var(--accent); font-weight: 600; }
+ol.steps { padding-left: 1.3em; margin: 0; }
+ol.steps > li { margin: 0 0 26px; }
+ol.steps > li::marker { font-weight: 700; color: var(--accent); }
+.cmd { position: relative; margin: 8px 0; }
+.cmd pre {
+  margin: 0; padding: 12px 64px 12px 14px; border-radius: 8px;
+  background: var(--code-bg); color: var(--code-fg); overflow-x: auto;
+  font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.cmd .os { display: block; font-size: .8rem; color: var(--muted); margin-bottom: 2px; }
+.copy {
+  position: absolute; top: 8px; right: 8px; padding: 3px 9px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--card); color: var(--muted);
+  font: 12px system-ui, sans-serif; cursor: pointer;
+}
+.cmd .os + pre + .copy { top: 30px; }
+code { font: .92em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+pre code { background: none; padding: 0; }
+ul.plain { padding-left: 1.2em; margin: 0 0 14px; }
+ul.plain li { margin-bottom: 6px; }
+footer { padding: 32px 0 56px; border-top: 1px solid var(--line); color: var(--muted); font-size: .92rem; }
+@media (max-width: 520px) {
+  body { font-size: 16px; }
+  header { padding-top: 40px; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <span class="mark">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="15" fill="currentColor"/><path d="M12 9.5v13l11-6.5z" fill="#fff"/></svg>
+    Arbatrate
+  </span>
+  <h1>A remote browser appliance to receive all types of resources</h1>
+  <p class="lede">Run Chromium on a well-connected machine and use it from a thin
+  laptop. The picture comes through waypipe, the sound comes as Opus, and
+  media can be handed off to a player on your own machine.</p>
+  <div class="actions">
+    <a class="btn primary" href="#install">Install</a>
+    <a class="btn secondary" href="https://github.com/pythagorean/arbatrator">Source on GitHub</a>
+  </div>
+</header>
+
+<section>
+  <h2>What it does</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>A browser that lives elsewhere</h3>
+      <p>Chromium runs in a Podman container on a VM or server, with its own
+      persistent profile and its own network location. Your laptop only
+      draws the window.</p>
+    </div>
+    <div class="card">
+      <h3>Picture and sound</h3>
+      <p>waypipe carries the window to your Wayland desktop. The browser's
+      sound is captured from PipeWire and streamed to you as low-latency
+      Opus, over the same SSH connection.</p>
+    </div>
+    <div class="card">
+      <h3>Media to your own player</h3>
+      <p>Right-click a video and choose <em>Play locally</em>. The appliance
+      fetches it and streams it to mpv on your machine, picking up where
+      you were.</p>
+    </div>
+    <div class="card">
+      <h3>Protected media stays put</h3>
+      <p>DRM-protected media is never handed off. It plays in the remote
+      browser only.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>How it fits together</h2>
+  <div class="diagram" role="img" aria-label="Your machine runs arbatrate, which connects over one SSH connection to the appliance host. On the host, waypipe runs a Podman container holding Chromium, PipeWire and the handoff helpers. The window, the sound and handed-off media come back to your machine.">
+    <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg">
+      <rect class="outer" x="10" y="20" width="250" height="260" rx="10"/>
+      <text x="26" y="44">your machine</text>
+      <rect class="box" x="30" y="60" width="210" height="52" rx="8"/>
+      <text x="44" y="83">waypipe client</text>
+      <text class="sub" x="44" y="101">the browser window</text>
+      <rect class="box" x="30" y="128" width="210" height="52" rx="8"/>
+      <text x="44" y="151">audio player</text>
+      <text class="sub" x="44" y="169">Opus from the appliance</text>
+      <rect class="box" x="30" y="196" width="210" height="52" rx="8"/>
+      <text x="44" y="219">media player</text>
+      <text class="sub" x="44" y="237">handed-off video</text>
+
+      <rect class="outer" x="480" y="20" width="270" height="260" rx="10"/>
+      <text x="496" y="44">appliance host · podman container</text>
+      <rect class="box" x="500" y="60" width="230" height="52" rx="8"/>
+      <text x="514" y="83">Chromium on Wayland</text>
+      <text class="sub" x="514" y="101">own profile, own network</text>
+      <rect class="box" x="500" y="128" width="230" height="52" rx="8"/>
+      <text x="514" y="151">PipeWire sink</text>
+      <text class="sub" x="514" y="169">recorded and encoded</text>
+      <rect class="box" x="500" y="196" width="230" height="52" rx="8"/>
+      <text x="514" y="219">handoff and fetch</text>
+      <text class="sub" x="514" y="237">extension, yt-dlp, ffmpeg</text>
+
+      <path class="wire" d="M500 86 H240"/>
+      <path class="wire" d="M500 154 H240"/>
+      <path class="wire" d="M500 222 H240"/>
+      <text class="label" x="300" y="78">display</text>
+      <text class="label" x="300" y="146">sound</text>
+      <text class="label" x="300" y="214">media</text>
+      <text class="sub" x="290" y="272">all over one SSH connection</text>
+    </svg>
+  </div>
+</section>
+
+<section id="install">
+  <h2>Install</h2>
+  <p>There are two machines: <strong>your machine</strong> (the client, such
+  as a laptop) and the <strong>appliance host</strong> (usually a VM with a
+  good connection). You install Arbatrate on your machine, and it installs
+  itself on the host over SSH.</p>
+
+  <ol class="steps">
+    <li>
+      <strong>Prepare the appliance host.</strong> It needs rootless
+      <code>podman</code> 4.3 or newer and <code>waypipe</code>, and you need
+      to be able to log in to it with an SSH key.
+      <div class="cmd"><span class="os">Fedora</span><pre><code>sudo dnf install podman waypipe</code></pre></div>
+      <div class="cmd"><span class="os">Debian, Ubuntu</span><pre><code>sudo apt install podman waypipe</code></pre></div>
+      Let the SSH user keep a runtime directory without a desktop login (systemd hosts, once):
+      <div class="cmd"><pre><code>sudo loginctl enable-linger "$USER"</code></pre></div>
+    </li>
+    <li>
+      <strong>Prepare your machine.</strong> It needs a Wayland desktop,
+      <code>git</code>, <code>make</code>, <code>ssh</code>, Python 3.11 or
+      newer, <code>mpv</code>, and <code>waypipe</code> (the same version as
+      on the host).
+      <div class="cmd"><span class="os">Fedora</span><pre><code>sudo dnf install git make openssh-clients python3 mpv waypipe</code></pre></div>
+      <div class="cmd"><span class="os">Debian, Ubuntu</span><pre><code>sudo apt install git make openssh-client python3 mpv waypipe</code></pre></div>
+      <div class="cmd"><span class="os">Arch</span><pre><code>sudo pacman -S git make openssh python mpv waypipe</code></pre></div>
+    </li>
+    <li>
+      <strong>Download and install Arbatrate.</strong>
+      <div class="cmd"><pre><code>git clone https://github.com/pythagorean/arbatrator.git</code></pre></div>
+      <div class="cmd"><pre><code>cd arbatrator &amp;&amp; make install</code></pre></div>
+      This puts <code>arbatrate</code> in <code>~/.local/bin</code>; make
+      sure that is on your <code>PATH</code>.
+    </li>
+    <li>
+      <strong>Tell it where the host is.</strong>
+      <div class="cmd"><pre><code>mkdir -p ~/.config/arbatrate &amp;&amp; cp client/config.example.toml ~/.config/arbatrate/config.toml</code></pre></div>
+      Edit that file and set <code>host</code> to what you would type after
+      <code>ssh</code>, such as <code>host = "you@browser-vm"</code>. Every
+      other setting is optional and explained in the file.
+    </li>
+    <li>
+      <strong>Install the appliance on the host.</strong> This copies it
+      over and builds the image there; the first build takes a few minutes.
+      <div class="cmd"><pre><code>arbatrate install-host</code></pre></div>
+    </li>
+    <li>
+      <strong>Check both ends.</strong> Anything marked MISSING or DIFFER
+      says what to fix.
+      <div class="cmd"><pre><code>arbatrate doctor</code></pre></div>
+    </li>
+    <li>
+      <strong>Open the browser.</strong>
+      <div class="cmd"><pre><code>arbatrate</code></pre></div>
+      Close the window or press Ctrl-C to end the session. Your profile is
+      kept for next time; <code>arbatrate --profile work</code> opens a
+      separate one.
+    </li>
+  </ol>
+
+  <h3>Updating</h3>
+  <div class="cmd"><pre><code>cd arbatrator &amp;&amp; git pull &amp;&amp; make install &amp;&amp; arbatrate install-host</code></pre></div>
+</section>
+
+<section>
+  <h2>Handing media off</h2>
+  <ul class="plain">
+    <li>Right-click a video or audio element: <strong>Play locally</strong>.</li>
+    <li>Right-click a link: <strong>Play link locally</strong>.</li>
+    <li>Right-click the page, or click the Arbatrate toolbar button:
+    <strong>Play this page's media locally</strong>.</li>
+  </ul>
+  <p>In the default <em>relay</em> mode, the appliance fetches the media
+  with the browser's cookies and streams it to your player, so sites only
+  ever see the appliance. In <em>local</em> mode, your player fetches the
+  URL itself. Either way, protected media is refused.</p>
+</section>
+
+<section>
+  <h2>On a slow connection</h2>
+  <p>Almost all the bandwidth goes to the picture. Stronger compression
+  usually helps on a slow link. Add this to your configuration:</p>
+  <div class="cmd"><pre><code>[waypipe]
+options = ["--compress=zstd=7"]</code></pre></div>
+  <p>For handed-off video, <code>relay_format</code> and
+  <code>relay_transcode</code> in the same file let the appliance send a
+  smaller stream.</p>
+</section>
+
+<section>
+  <h2>How it behaves</h2>
+  <ul class="plain">
+    <li><strong>Nothing is restarted.</strong> If any part of a session
+    ends, the whole session ends and tells you which part it was.</li>
+    <li><strong>One connection.</strong> Everything travels over a single
+    SSH connection; the host needs nothing listening but <code>sshd</code>.</li>
+    <li><strong>Chromium's own sandbox stays on</strong> inside the
+    container.</li>
+  </ul>
+  <p>More detail is in the <a href="https://github.com/pythagorean/arbatrator/blob/main/docs/ARCHITECTURE.md">architecture notes</a>.</p>
+</section>
+
+<footer>
+  Arbatrate is a public gift: its own code is in the public domain
+  (<a href="https://github.com/pythagorean/arbatrator/blob/main/LICENSE">Unlicense</a>).
+  Chromium and the other software the appliance is built from keep their
+  own licenses.
+</footer>
+
+</div>
+<script>
+document.querySelectorAll(".cmd").forEach(function (box) {
+  var code = box.querySelector("code");
+  if (!navigator.clipboard) return;
+  var b = document.createElement("button");
+  b.className = "copy";
+  b.type = "button";
+  b.textContent = "Copy";
+  b.addEventListener("click", function () {
+    navigator.clipboard.writeText(code.textContent).then(function () {
+      b.textContent = "Copied";
+      setTimeout(function () { b.textContent = "Copy"; }, 1500);
+    });
+  });
+  box.appendChild(b);
+});
+</script>
+</body>
+</html>

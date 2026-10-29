@@ -28,49 +28,94 @@ only.
                                               └──────────────────────────────────────┘
 ```
 
-## What you need
+## Install
 
-**On your machine:** a Wayland session, `waypipe`, `ssh`, Python 3.11 or
-newer, and `mpv` (or another player you configure).
+There are two machines: **your machine** (the client, e.g. a laptop) and the
+**appliance host** (usually a VM with a good connection). You install
+Arbatrate on your machine; it installs itself on the host over SSH.
 
-**On the appliance host:** `podman` 4.3 or newer (rootless), `waypipe` (the
-same version as on your machine), and an `XDG_RUNTIME_DIR` for the SSH user.
-On a systemd host, `loginctl enable-linger USER` gives the user one without
-a desktop login.
+### 1. Prepare the appliance host
 
-## Setup
-
-On your machine, from a checkout of this repository:
+It needs rootless `podman` 4.3 or newer and `waypipe`, and you need to be
+able to log in to it with an SSH key.
 
 ```bash
-make install
-```
-
-This installs `arbatrate` into `~/.local/bin` and the appliance sources into
-`~/.local/share/arbatrate`. `make install PREFIX=/usr/local` installs
-elsewhere.
-
-Write `~/.config/arbatrate/config.toml`. Only `host` is required; the
-example lists every setting with its default:
-
-```bash
-mkdir -p ~/.config/arbatrate
+sudo dnf install podman waypipe        # Fedora
 ```
 
 ```bash
-cp client/config.example.toml ~/.config/arbatrate/config.toml
+sudo apt install podman waypipe        # Debian, Ubuntu
 ```
 
-Copy the appliance to the host and build its image there:
+The SSH user needs an `XDG_RUNTIME_DIR` even when nobody is logged in at the
+host. On a systemd host this does it, once:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+### 2. Prepare your machine
+
+It needs a Wayland desktop, `git`, `make`, `ssh`, Python 3.11 or newer,
+`mpv`, and `waypipe` (the same version as on the host).
+
+```bash
+sudo dnf install git make openssh-clients python3 mpv waypipe     # Fedora
+```
+
+```bash
+sudo apt install git make openssh-client python3 mpv waypipe      # Debian, Ubuntu
+```
+
+```bash
+sudo pacman -S git make openssh python mpv waypipe                # Arch
+```
+
+### 3. Download and install Arbatrate
+
+```bash
+git clone https://github.com/pythagorean/arbatrator.git
+```
+
+```bash
+cd arbatrator && make install
+```
+
+This puts `arbatrate` in `~/.local/bin` (make sure that is on your `PATH`)
+and the appliance sources in `~/.local/share/arbatrate`.
+`make install PREFIX=/usr/local` installs elsewhere.
+
+### 4. Tell it where the host is
+
+```bash
+mkdir -p ~/.config/arbatrate && cp client/config.example.toml ~/.config/arbatrate/config.toml
+```
+
+Edit `~/.config/arbatrate/config.toml` and set `host` to what you would type
+after `ssh`, e.g. `host = "you@browser-vm"`. Every other setting is optional
+and the file explains each one.
+
+### 5. Install the appliance on the host
 
 ```bash
 arbatrate install-host
 ```
 
-Check both ends:
+This copies the appliance to the host and builds its image there. The first
+build downloads Chromium and the rest, so it takes a few minutes.
+
+### 6. Check both ends
 
 ```bash
 arbatrate doctor
+```
+
+Anything marked MISSING or DIFFER says what to fix.
+
+### Updating
+
+```bash
+cd arbatrator && git pull && make install && arbatrate install-host
 ```
 
 ## Use
